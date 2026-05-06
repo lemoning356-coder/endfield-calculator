@@ -1080,8 +1080,6 @@ atk = floor_num(
     base_total_attack * (1 + ability_bonus)
 )
 
-st.markdown("### 攻击力调试")
-
 debug_df = pd.DataFrame([
     ["干员攻击力", round(char_atk, 2)],
     ["武器攻击力", round(weapon_base_atk, 2)],
@@ -1096,17 +1094,51 @@ debug_df = pd.DataFrame([
     ["最终攻击力", atk]
 ], columns=["项目", "数值"])
 
-st.table(debug_df)
+with st.expander("攻击力来源 / 调试", expanded=False):
+    st.table(debug_df)
 
-st.markdown("#### 能力值来源")
+def related_ability_text(text, attr_name, main_attr, sub_attr):
+    text = clean_text(text)
+    if not text or text == "无":
+        return False
 
-ability_debug = []
+    keywords = [attr_name, f"{attr_name}能力值"]
 
-for t in all_texts:
-    if "敏捷" in str(t):
-        ability_debug.append([str(t)])
+    if attr_name == main_attr:
+        keywords += ["主能力值", "主能力", "主属性"]
 
-st.table(pd.DataFrame(ability_debug, columns=["包含敏捷的词条"]))
+    if attr_name == sub_attr:
+        keywords += ["副能力值", "副能力", "副属性"]
+
+    keywords += ["全能力值", "全能力"]
+
+    return any(k in text for k in keywords)
+
+
+ability_source_rows = []
+
+for attr_name in [main_attr, sub_attr]:
+    if not attr_name:
+        continue
+
+    for t in all_texts:
+        if related_ability_text(t, attr_name, main_attr, sub_attr):
+            ability_source_rows.append([
+                "主属性" if attr_name == main_attr else "副属性",
+                attr_name,
+                clean_text(t)
+            ])
+
+ability_source_df = pd.DataFrame(
+    ability_source_rows,
+    columns=["类型", "属性", "来源词条"]
+)
+
+with st.expander("主 / 副属性能力值来源", expanded=False):
+    if len(ability_source_df) > 0:
+        st.table(ability_source_df)
+    else:
+        st.write("当前没有主 / 副属性相关词条。")
 
 base_hp = to_num(safe_get(character_data, "生命值", 0), 0)
 hp_flat = sum(stat_flat_from_text(t, ["生命值"]) for t in all_texts)
