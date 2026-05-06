@@ -287,7 +287,7 @@ for path in [CHARACTER_EXCEL, WEAPON_EXCEL, EQUIP_EXCEL]:
         st.stop()
 
 characters_df, weapon_df, equip_df = load_data(str(CHARACTER_EXCEL), str(WEAPON_EXCEL), str(EQUIP_EXCEL))
-equip_formula_map = load_equipment_formula_map(str(EQUIP_EXCEL))
+equip_formula_map = {}
 
 # =========================
 # 基础工具函数
