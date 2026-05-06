@@ -969,6 +969,7 @@ def select_equip(slot_name, part, slot_key):
     return row, {"①": lv1, "②": lv2, "③": lv3}
 
 if enable_equipment:
+    equip_formula_map = load_equipment_formula_map(str(EQUIP_EXCEL))
     e1, e2, e3, e4 = st.columns(4)
     with e1:
         armor_row, armor_ref = select_equip("护甲", "护甲", "armor")
