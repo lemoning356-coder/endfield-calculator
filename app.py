@@ -113,13 +113,6 @@ div[data-testid="stSidebar"] .block-container{padding-top:2.0rem;}
 div[data-testid="stSlider"]{padding-top:.2rem;}
 div[data-testid="stSelectbox"]{margin-bottom:.1rem;}
 hr.soft-line{border:none;border-top:1px solid #e5e7eb;margin:10px 0 14px;}
-
-/* 伤害计算页面：让输入框和按钮更紧凑 */
-div[data-testid="stNumberInput"] input{min-height:2.15rem !important;padding-top:0.25rem !important;padding-bottom:0.25rem !important;}
-div[data-testid="stNumberInput"] button{min-height:2.15rem !important;}
-div[data-testid="stSelectbox"] div[data-baseweb="select"]{min-height:2.25rem !important;}
-div.stButton > button{min-height:2.25rem; padding-top:0.25rem; padding-bottom:0.25rem;}
-
 </style>
 """, unsafe_allow_html=True)
 
@@ -1434,6 +1427,7 @@ if page_mode == "编队设置":
         "副属性值": sub_total,
         "暴击率": crit_rate,
         "暴击伤害": crit_damage,
+        "源石技艺强度": source_skill,
         "物理伤害加成": physical_bonus,
         "灼热伤害加成": heat_bonus,
         "电磁伤害加成": electric_bonus,
@@ -1461,6 +1455,28 @@ elif page_mode == "伤害计算":
 
     SLOT_LABELS = ["1号位", "2号位", "3号位", "4号位"]
     DAMAGE_TYPES = ["物理", "灼热", "电磁", "寒冷", "自然"]
+    ACTION_TYPES = ["普通攻击", "处决", "战技", "连携技", "终结技", "物理异常"]
+    PHYSICAL_ANOMALY_CONFIG = {
+        "击飞": {"基础倍率": 120.0, "吃等级": False},
+        "倒地": {"基础倍率": 120.0, "吃等级": False},
+        "碎甲": {"基础倍率": 50.0, "吃等级": True},
+        "猛击": {"基础倍率": 150.0, "吃等级": True},
+    }
+    SUNDER_VULN_BASE = {"无": 0.0, "Lv1": 0.12, "Lv2": 0.16, "Lv3": 0.20, "Lv4": 0.24}
+
+    def sunder_vuln_value(level_name, source_skill):
+        base = SUNDER_VULN_BASE.get(str(level_name), 0.0)
+        return base * (1 + to_num(source_skill, 0) * 0.005)
+
+    def axis_action_display(row):
+        action = row.get("动作", "普通攻击")
+        if action == "物理异常":
+            anomaly_type = row.get("异常类型", "击飞")
+            if anomaly_type in ["碎甲", "猛击"]:
+                lv = int(to_num(row.get("异常等级", 1), 1))
+                return f"异常·{anomaly_type} Lv{lv}"
+            return f"异常·{anomaly_type}"
+        return action
 
     MEDICINE_EXCEL = next(BASE_DIR.glob("zmd伤害计算器*.xlsx"), None)
 
@@ -1500,6 +1516,7 @@ elif page_mode == "伤害计算":
         electric = to_num(panel.get("电磁伤害加成", 0), 0)
         cold = to_num(panel.get("寒冷伤害加成", 0), 0)
         nature = to_num(panel.get("自然伤害加成", 0), 0)
+        source_skill = to_num(panel.get("源石技艺强度", 0), 0)
 
         skill_bonus_common = {
             "战技伤害加成": to_num(panel.get("战技伤害加成", 0), 0),
@@ -1517,6 +1534,7 @@ elif page_mode == "伤害计算":
                 "电磁伤害加成": electric,
                 "寒冷伤害加成": cold,
                 "自然伤害加成": nature,
+                "源石技艺强度": source_skill,
                 **skill_bonus_common,
             }
 
@@ -1685,7 +1703,7 @@ elif page_mode == "伤害计算":
             return 0, {}
 
         action_type = row.get("动作", "普通攻击")
-        damage_type = row.get("伤害属性", "物理")
+        damage_type = "物理" if action_type == "物理异常" else row.get("伤害属性", "物理")
         crit_mode = row.get("暴击模式", "期望")
 
         atk = to_num(panel.get("攻击力", 0), 0)
@@ -1702,8 +1720,54 @@ elif page_mode == "伤害计算":
         else:
             crit_mult = 1
 
+        source_skill = to_num(panel.get("源石技艺强度", base_panel.get("源石技艺强度", 0)), 0)
+        sunder_level = row.get("碎甲易伤等级", "无")
+        sunder_vuln = sunder_vuln_value(sunder_level, source_skill) if damage_type == "物理" else 0.0
+
         base_damage_bonus = to_num(panel.get(f"{damage_type}伤害加成", 0), 0)
         extra_attr_bonus = to_num(row.get("属性增伤%", 0), 0) / 100
+        vuln_final = to_num(row.get("易伤%", 0), 0) / 100 + sunder_vuln
+        fragile_final = to_num(row.get("脆弱%", 0), 0) / 100
+        amp_final = to_num(row.get("增幅%", 0), 0) / 100
+        stagger_mult = 1.3 if bool(row.get("失衡易伤30%", False)) else 1.0
+
+        if action_type == "物理异常":
+            anomaly_type = row.get("异常类型", "击飞")
+            cfg = PHYSICAL_ANOMALY_CONFIG.get(anomaly_type, PHYSICAL_ANOMALY_CONFIG["击飞"])
+            base_mult = to_num(cfg.get("基础倍率", 120), 120)
+            anomaly_level = int(to_num(row.get("异常等级", 1), 1))
+            anomaly_multiplier = base_mult * (1 + anomaly_level) / 100 if cfg.get("吃等级", False) else base_mult / 100
+            trigger_level = to_num(base_panel.get("等级", 90), 90)
+            level_coef = 1 + (trigger_level - 1) / 392
+            source_coef = 1 + source_skill / 100
+            damage_bonus_total = base_damage_bonus + extra_attr_bonus
+
+            damage = math.floor(
+                final_atk_for_calc
+                * anomaly_multiplier
+                * level_coef
+                * source_coef
+                * (1 + damage_bonus_total)
+                * (1 + vuln_final)
+                * (1 + fragile_final)
+                * (1 + amp_final)
+                * stagger_mult
+                * crit_mult
+            )
+            detail = {
+                "干员": base_panel.get("干员", row.get("干员", "")),
+                "原攻击力": atk,
+                "计算攻击力": math.floor(final_atk_for_calc),
+                "异常类型": anomaly_type,
+                "异常倍率": anomaly_multiplier,
+                "等级系数": level_coef,
+                "源石技艺强度区": source_coef,
+                "碎甲易伤": sunder_vuln,
+                "伤害加成区": damage_bonus_total,
+                "暴击倍率": crit_mult,
+                "失衡倍率": stagger_mult,
+            }
+            return damage, detail
 
         skill_bonus = 0
         if action_type == "战技":
@@ -1714,13 +1778,9 @@ elif page_mode == "伤害计算":
             skill_bonus = to_num(panel.get("终结技伤害加成", 0), 0)
         skill_bonus += to_num(row.get("技能增伤%", 0), 0) / 100
 
-        damage_bonus_total = base_damage_bonus + extra_attr_bonus + skill_bonus
-        vuln_final = to_num(row.get("易伤%", 0), 0) / 100
-        fragile_final = to_num(row.get("脆弱%", 0), 0) / 100
-        amp_final = to_num(row.get("增幅%", 0), 0) / 100
         combo_final = to_num(row.get("连击增伤%", 0), 0) / 100
-        stagger_mult = 1.3 if bool(row.get("失衡易伤30%", False)) else 1.0
         multiplier = to_num(row.get("倍率%", 0), 0) / 100
+        damage_bonus_total = base_damage_bonus + extra_attr_bonus + skill_bonus
 
         damage = math.floor(
             final_atk_for_calc
@@ -1737,6 +1797,7 @@ elif page_mode == "伤害计算":
             "干员": base_panel.get("干员", row.get("干员", "")),
             "原攻击力": atk,
             "计算攻击力": math.floor(final_atk_for_calc),
+            "碎甲易伤": sunder_vuln,
             "伤害加成区": damage_bonus_total,
             "暴击倍率": crit_mult,
             "失衡倍率": stagger_mult,
@@ -1756,55 +1817,64 @@ elif page_mode == "伤害计算":
 
     with left_col:
         st.markdown("#### 添加动作")
-
         if not available_slots:
             st.info("当前没有可计算的干员。请先在编队页保存面板。")
         else:
-            # 顶部选择区：压成一行，减少纵向长度
             select_cols = st.columns([1.35, 1.0, 1.0])
             with select_cols[0]:
                 calc_slot_display = st.selectbox("干员", available_slots, key="axis_calc_slot")
             calc_slot = slot_display_map[calc_slot_display]
             calc_char_name = st.session_state.team_panel_results.get(calc_slot, {}).get("干员", "")
             with select_cols[1]:
-                calc_action_type = st.selectbox("动作", ["普通攻击", "处决", "战技", "连携技", "终结技"], key="axis_calc_action_type")
+                calc_action_type = st.selectbox("动作", ACTION_TYPES, key="axis_calc_action_type")
             with select_cols[2]:
-                calc_damage_type = st.selectbox("属性", DAMAGE_TYPES, key="axis_calc_damage_type")
+                if calc_action_type == "物理异常":
+                    calc_damage_type = "物理"
+                    st.selectbox("属性", ["物理"], key="axis_calc_damage_type_physical_anomaly")
+                else:
+                    calc_damage_type = st.selectbox("属性", DAMAGE_TYPES, key="axis_calc_damage_type")
 
-            st.markdown("##### 倍率便捷计算")
-            quick_cols = st.columns([1, 1, 1, 0.95])
-            with quick_cols[0]:
-                quick_m1 = st.number_input("倍率1%", value=0.0, step=1.0, key="quick_m1")
-            with quick_cols[1]:
-                quick_m2 = st.number_input("倍率2%", value=0.0, step=1.0, key="quick_m2")
-            with quick_cols[2]:
-                quick_m3 = st.number_input("倍率3%", value=0.0, step=1.0, key="quick_m3")
+            physical_anomaly_type = ""
+            physical_anomaly_level = 1
+            if calc_action_type == "物理异常":
+                anomaly_cols = st.columns(2)
+                with anomaly_cols[0]:
+                    physical_anomaly_type = st.selectbox("异常类型", list(PHYSICAL_ANOMALY_CONFIG.keys()), key="axis_physical_anomaly_type")
+                with anomaly_cols[1]:
+                    if PHYSICAL_ANOMALY_CONFIG[physical_anomaly_type]["吃等级"]:
+                        physical_anomaly_level = st.selectbox("异常等级", [1, 2, 3, 4], key="axis_physical_anomaly_level")
+                    else:
+                        st.caption("击飞 / 倒地固定倍率，不显示异常等级。")
 
-            quick_total = quick_m1 + quick_m2 + quick_m3
-            with quick_cols[3]:
-                st.markdown(
-                    f"""
-                    <div style='background:#eaf3ff;border:1px solid #d8e8ff;border-radius:10px;
-                                padding:7px 8px;margin-top:25px;text-align:center;'>
-                        <div style='font-size:11px;color:#6b7280;font-weight:700;'>合计</div>
-                        <div style='font-size:20px;font-weight:900;color:#111827;'>{quick_total:.1f}%</div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True
-                )
-
-            if "axis_calc_multiplier" not in st.session_state:
-                st.session_state["axis_calc_multiplier"] = 0.0
-
-            if st.button("使用合计倍率", use_container_width=True, key="use_quick_multiplier_btn"):
-                st.session_state["axis_calc_multiplier"] = float(quick_total)
-                st.rerun()
+            if calc_action_type != "物理异常":
+                with st.expander("倍率便捷计算", expanded=False):
+                    quick_cols = st.columns([1, 1, 1, 0.95])
+                    with quick_cols[0]:
+                        quick_m1 = st.number_input("倍率1%", value=0.0, step=1.0, key="quick_m1")
+                    with quick_cols[1]:
+                        quick_m2 = st.number_input("倍率2%", value=0.0, step=1.0, key="quick_m2")
+                    with quick_cols[2]:
+                        quick_m3 = st.number_input("倍率3%", value=0.0, step=1.0, key="quick_m3")
+                    quick_total = quick_m1 + quick_m2 + quick_m3
+                    with quick_cols[3]:
+                        st.metric("合计", f"{quick_total:.1f}%")
+                    if "axis_calc_multiplier" not in st.session_state:
+                        st.session_state["axis_calc_multiplier"] = 0.0
+                    if st.button("使用合计倍率", use_container_width=True, key="use_quick_multiplier_btn"):
+                        st.session_state["axis_calc_multiplier"] = float(quick_total)
+                        st.rerun()
+            else:
+                if "axis_calc_multiplier" not in st.session_state:
+                    st.session_state["axis_calc_multiplier"] = 0.0
 
             st.markdown("##### 参数区")
-            # 三列排布，单个输入框更窄，整体高度也更短
             r1 = st.columns(3)
             with r1[0]:
-                calc_multiplier = st.number_input("倍率%", value=0.0, step=1.0, key="axis_calc_multiplier")
+                if calc_action_type == "物理异常":
+                    calc_multiplier = 0.0
+                    st.caption("异常倍率自动计算。")
+                else:
+                    calc_multiplier = st.number_input("倍率%", value=0.0, step=1.0, key="axis_calc_multiplier")
             with r1[1]:
                 fixed_atk_buff = st.number_input("固定攻击", value=0.0, step=10.0, key="axis_fixed_atk_buff")
             with r1[2]:
@@ -1812,31 +1882,34 @@ elif page_mode == "伤害计算":
 
             r2 = st.columns(3)
             with r2[0]:
-                extra_crit_rate = st.number_input("额外暴击率%", value=0.0, step=1.0, key="axis_extra_crit_rate")
-            with r2[1]:
-                extra_crit_damage = st.number_input("额外暴伤%", value=0.0, step=1.0, key="axis_extra_crit_damage")
-            with r2[2]:
-                extra_damage_bonus = st.number_input("属性增伤%", value=0.0, step=1.0, key="axis_extra_damage_bonus")
-
-            r3 = st.columns(3)
-            with r3[0]:
-                skill_bonus_buff = st.number_input("技能增伤%", value=0.0, step=1.0, key="axis_skill_bonus_buff")
-            with r3[1]:
                 vuln_buff = st.number_input("易伤%", value=0.0, step=1.0, key="axis_vuln_buff")
-            with r3[2]:
-                fragile_buff = st.number_input("脆弱%", value=0.0, step=1.0, key="axis_fragile_buff")
-
-            r4 = st.columns(3)
-            with r4[0]:
-                amp_buff = st.number_input("增幅%", value=0.0, step=1.0, key="axis_amp_buff")
-            with r4[1]:
-                combo_buff = st.number_input("连击增伤%", value=0.0, step=1.0, key="axis_combo_buff")
-            with r4[2]:
+            with r2[1]:
+                sunder_vuln_level = st.selectbox("碎甲易伤", ["无", "Lv1", "Lv2", "Lv3", "Lv4"], key="axis_sunder_vuln_level")
+            with r2[2]:
                 calc_is_expect = st.selectbox("暴击", ["期望", "不暴击", "必暴击"], key="axis_calc_crit_mode")
 
-            fixed_cols = st.columns([1.0, 1.25])
-            with fixed_cols[0]:
-                use_stagger_bonus = st.toggle("失衡易伤30%", value=False, key="axis_use_stagger_bonus")
+            with st.expander("高级参数", expanded=False):
+                adv1 = st.columns(3)
+                with adv1[0]:
+                    extra_crit_rate = st.number_input("额外暴击率%", value=0.0, step=1.0, key="axis_extra_crit_rate")
+                with adv1[1]:
+                    extra_crit_damage = st.number_input("额外暴伤%", value=0.0, step=1.0, key="axis_extra_crit_damage")
+                with adv1[2]:
+                    extra_damage_bonus = st.number_input("属性增伤%", value=0.0, step=1.0, key="axis_extra_damage_bonus")
+                adv2 = st.columns(3)
+                with adv2[0]:
+                    skill_bonus_buff = st.number_input("技能增伤%", value=0.0, step=1.0, key="axis_skill_bonus_buff")
+                with adv2[1]:
+                    fragile_buff = st.number_input("脆弱%", value=0.0, step=1.0, key="axis_fragile_buff")
+                with adv2[2]:
+                    amp_buff = st.number_input("增幅%", value=0.0, step=1.0, key="axis_amp_buff")
+                adv3 = st.columns(3)
+                with adv3[0]:
+                    combo_buff = st.number_input("连击增伤%", value=0.0, step=1.0, key="axis_combo_buff")
+                with adv3[1]:
+                    use_stagger_bonus = st.toggle("失衡易伤30%", value=False, key="axis_use_stagger_bonus")
+                with adv3[2]:
+                    st.caption("物理异常不吃技能增伤和连击增伤。")
 
             preview_row = {
                 "位置": calc_slot,
@@ -1851,27 +1924,26 @@ elif page_mode == "伤害计算":
                 "技能增伤%": skill_bonus_buff,
                 "属性增伤%": extra_damage_bonus,
                 "易伤%": vuln_buff,
+                "碎甲易伤等级": sunder_vuln_level,
                 "脆弱%": fragile_buff,
                 "增幅%": amp_buff,
                 "连击增伤%": combo_buff,
+                "异常类型": physical_anomaly_type,
+                "异常等级": physical_anomaly_level,
                 "失衡易伤30%": use_stagger_bonus,
                 "暴击模式": calc_is_expect,
             }
             preview_damage, _ = calc_axis_damage(preview_row)
-            with fixed_cols[1]:
-                st.metric("本次预览伤害", f"{preview_damage:,.0f}")
-
-            submit_action = st.button("添加到伤害轴", use_container_width=True, key="add_action_to_axis_btn")
-            if submit_action:
+            st.metric("本次预览伤害", f"{preview_damage:,.0f}")
+            if st.button("添加到伤害轴", use_container_width=True, key="add_action_to_axis_btn"):
                 preview_row["本次伤害"] = preview_damage
                 st.session_state.damage_axis_rows.append(preview_row.copy())
                 st.session_state.damage_axis_editor_version += 1
                 st.rerun()
+
     with right_col:
         st.markdown("#### 当前伤害轴")
-
         if st.session_state.damage_axis_rows:
-            # 先按当前动作顺序重算每段伤害和总伤害
             working_rows = []
             final_total = 0
             for idx, raw_row in enumerate(st.session_state.damage_axis_rows, start=1):
@@ -1881,124 +1953,80 @@ elif page_mode == "伤害计算":
                 row["序号"] = idx
                 row["本次伤害"] = dmg
                 row["累计伤害"] = final_total
+                row["动作显示"] = axis_action_display(row)
                 if "删除" not in row:
                     row["删除"] = False
                 working_rows.append(row)
 
-            # 总伤害放在右侧伤害轴最上面，方便一眼看累计结果
             top_m1, top_m2 = st.columns([1.35, 1.0])
             with top_m1:
                 st.metric("伤害累计", f"{final_total:,.0f}")
             with top_m2:
                 st.metric("动作数", len(st.session_state.damage_axis_rows))
 
-            # 左边是动作轴表格，右边是调序按钮
-            axis_table_col, axis_order_col = st.columns([3.2, 1.05])
-
+            axis_table_col, axis_side_col = st.columns([3.2, 1.05])
             with axis_table_col:
                 axis_df = pd.DataFrame(working_rows)
-
-                # 主表只显示：序号 / 删除 / 角色 / 该动作伤害 / 动作类型
-                # 其他攻击、易伤、暴伤、倍率等细节仍保存在后台，不会丢。
-                display_cols = ["序号", "删除", "干员", "本次伤害", "动作"]
+                display_cols = ["序号", "删除", "干员", "本次伤害", "动作显示"]
                 axis_df = axis_df[[c for c in display_cols if c in axis_df.columns]]
-
                 edited_axis_df = st.data_editor(
                     axis_df,
                     use_container_width=True,
                     hide_index=True,
                     column_config={
-                        "序号": st.column_config.NumberColumn(
-                            "序号",
-                            width="small"
-                        ),
-                        "删除": st.column_config.CheckboxColumn(
-                            "删除",
-                            width="small"
-                        ),
-                        "干员": st.column_config.TextColumn(
-                            "角色",
-                            width="medium"
-                        ),
-                        "本次伤害": st.column_config.NumberColumn(
-                            "该动作伤害",
-                            format="%d",
-                            width="medium"
-                        ),
-                        "动作": st.column_config.SelectboxColumn(
-                            "动作类型",
-                            options=["普通攻击", "处决", "战技", "连携技", "终结技"],
-                            required=True,
-                            width="medium"
-                        ),
+                        "序号": st.column_config.NumberColumn("序号", width="small"),
+                        "删除": st.column_config.CheckboxColumn("删除", width="small"),
+                        "干员": st.column_config.TextColumn("角色", width="medium"),
+                        "本次伤害": st.column_config.NumberColumn("该动作伤害", format="%d", width="medium"),
+                        "动作显示": st.column_config.TextColumn("动作类型", width="medium"),
                     },
-                    disabled=["序号", "干员", "本次伤害"],
+                    disabled=["序号", "干员", "本次伤害", "动作显示"],
                     key=f"damage_axis_editor_{st.session_state.damage_axis_editor_version}"
                 )
-
                 if st.button("保存表格修改 / 删除勾选项", use_container_width=True, key="save_axis_editor_btn"):
                     original_rows = list(st.session_state.damage_axis_rows)
                     updated_rows = []
-
                     for _, raw_row in edited_axis_df.iterrows():
                         edited = raw_row.to_dict()
-
                         if bool(edited.get("删除", False)):
                             continue
-
                         seq = int(to_num(edited.get("序号", 0), 0)) - 1
                         if 0 <= seq < len(original_rows):
                             row = original_rows[seq].copy()
                         else:
                             continue
-
-                        # 主表只允许改动作类型；其他隐藏参数继续保留。
-                        if "动作" in edited:
-                            row["动作"] = edited["动作"]
-
                         slot = row.get("位置", "")
-                        row["干员"] = st.session_state.team_panel_results.get(slot, {}).get(
-                            "干员",
-                            row.get("干员", "")
-                        )
+                        row["干员"] = st.session_state.team_panel_results.get(slot, {}).get("干员", row.get("干员", ""))
                         row["删除"] = False
                         updated_rows.append(row)
-
                     st.session_state.damage_axis_rows = updated_rows
                     st.session_state.damage_axis_editor_version += 1
                     st.rerun()
 
-            with axis_order_col:
+            with axis_side_col:
                 st.markdown("##### 操作")
                 if "confirm_clear_axis" not in st.session_state:
                     st.session_state.confirm_clear_axis = False
-
                 if not st.session_state.confirm_clear_axis:
                     if st.button("清空伤害轴", use_container_width=True, key="clear_axis_prepare_btn"):
                         st.session_state.confirm_clear_axis = True
                         st.rerun()
                 else:
                     st.warning("确认清空？")
-                    clear_confirm_cols = st.columns(2)
-                    with clear_confirm_cols[0]:
+                    cc1, cc2 = st.columns(2)
+                    with cc1:
                         if st.button("确认", use_container_width=True, key="clear_axis_confirm_btn"):
                             st.session_state.damage_axis_rows = []
                             st.session_state.damage_axis_editor_version += 1
                             st.session_state.confirm_clear_axis = False
                             st.rerun()
-                    with clear_confirm_cols[1]:
+                    with cc2:
                         if st.button("取消", use_container_width=True, key="clear_axis_cancel_btn"):
                             st.session_state.confirm_clear_axis = False
                             st.rerun()
-
                 st.markdown("---")
                 st.markdown("##### 调序")
-                move_index = st.selectbox(
-                    "选择序号",
-                    list(range(1, len(st.session_state.damage_axis_rows) + 1)),
-                    key="axis_move_index"
-                )
-
+                move_index = st.selectbox("选择序号", list(range(1, len(st.session_state.damage_axis_rows) + 1)), key="axis_move_index")
                 if st.button("上移", use_container_width=True, key="axis_move_up_btn"):
                     idx = int(move_index) - 1
                     if idx > 0:
@@ -2006,7 +2034,6 @@ elif page_mode == "伤害计算":
                         rows_tmp[idx - 1], rows_tmp[idx] = rows_tmp[idx], rows_tmp[idx - 1]
                         st.session_state.damage_axis_editor_version += 1
                         st.rerun()
-
                 if st.button("下移", use_container_width=True, key="axis_move_down_btn"):
                     idx = int(move_index) - 1
                     if idx < len(st.session_state.damage_axis_rows) - 1:
@@ -2015,6 +2042,73 @@ elif page_mode == "伤害计算":
                         st.session_state.damage_axis_editor_version += 1
                         st.rerun()
 
+                st.markdown("---")
+                st.markdown("##### 详情")
+                detail_index = st.selectbox("查看/修改序号", list(range(1, len(st.session_state.damage_axis_rows) + 1)), key="axis_detail_index")
+                detail_idx = int(detail_index) - 1
+                detail_row = st.session_state.damage_axis_rows[detail_idx].copy()
+                detail_damage, _ = calc_axis_damage(detail_row)
+                st.metric("当前动作伤害", f"{detail_damage:,.0f}")
+                with st.expander("展开参数", expanded=False):
+                    current_slot = detail_row.get("位置", SLOT_LABELS[0])
+                    if current_slot not in SLOT_LABELS:
+                        current_slot = SLOT_LABELS[0]
+                    current_action = detail_row.get("动作", "普通攻击")
+                    if current_action not in ACTION_TYPES:
+                        current_action = "普通攻击"
+                    current_damage_type = detail_row.get("伤害属性", "物理")
+                    if current_damage_type not in DAMAGE_TYPES:
+                        current_damage_type = "物理"
+                    crit_options = ["期望", "不暴击", "必暴击"]
+                    current_crit_mode = detail_row.get("暴击模式", "期望")
+                    if current_crit_mode not in crit_options:
+                        current_crit_mode = "期望"
+                    edit_slot = st.selectbox("干员位置", SLOT_LABELS, index=SLOT_LABELS.index(current_slot), key=f"detail_slot_{detail_idx}_{st.session_state.damage_axis_editor_version}")
+                    edit_action = st.selectbox("动作类型", ACTION_TYPES, index=ACTION_TYPES.index(current_action), key=f"detail_action_{detail_idx}_{st.session_state.damage_axis_editor_version}")
+                    edit_anomaly_type = detail_row.get("异常类型", "击飞")
+                    edit_anomaly_level = int(to_num(detail_row.get("异常等级", 1), 1))
+                    if edit_action == "物理异常":
+                        edit_damage_type = "物理"
+                        anomaly_names = list(PHYSICAL_ANOMALY_CONFIG.keys())
+                        edit_anomaly_type = st.selectbox("异常类型", anomaly_names, index=anomaly_names.index(edit_anomaly_type) if edit_anomaly_type in anomaly_names else 0, key=f"detail_anomaly_type_{detail_idx}_{st.session_state.damage_axis_editor_version}")
+                        if PHYSICAL_ANOMALY_CONFIG[edit_anomaly_type]["吃等级"]:
+                            edit_anomaly_level = st.selectbox("异常等级", [1, 2, 3, 4], index=max(0, min(edit_anomaly_level, 4) - 1), key=f"detail_anomaly_level_{detail_idx}_{st.session_state.damage_axis_editor_version}")
+                        else:
+                            edit_anomaly_level = 1
+                            st.caption("击飞 / 倒地为固定倍率。")
+                    else:
+                        edit_damage_type = st.selectbox("伤害属性", DAMAGE_TYPES, index=DAMAGE_TYPES.index(current_damage_type), key=f"detail_damage_type_{detail_idx}_{st.session_state.damage_axis_editor_version}")
+                    d1, d2 = st.columns(2)
+                    with d1:
+                        edit_multiplier = 0.0 if edit_action == "物理异常" else st.number_input("倍率%", value=float(to_num(detail_row.get("倍率%", 0), 0)), step=1.0, key=f"detail_multiplier_{detail_idx}_{st.session_state.damage_axis_editor_version}")
+                        edit_atk_pct = st.number_input("攻击%", value=float(to_num(detail_row.get("攻击%", 0), 0)), step=1.0, key=f"detail_atk_pct_{detail_idx}_{st.session_state.damage_axis_editor_version}")
+                        edit_fixed_atk = st.number_input("固定攻击", value=float(to_num(detail_row.get("固定攻击", 0), 0)), step=10.0, key=f"detail_fixed_atk_{detail_idx}_{st.session_state.damage_axis_editor_version}")
+                        edit_vuln = st.number_input("易伤%", value=float(to_num(detail_row.get("易伤%", 0), 0)), step=1.0, key=f"detail_vuln_{detail_idx}_{st.session_state.damage_axis_editor_version}")
+                        sunder_levels = ["无", "Lv1", "Lv2", "Lv3", "Lv4"]
+                        current_sunder = detail_row.get("碎甲易伤等级", "无")
+                        edit_sunder = st.selectbox("碎甲易伤", sunder_levels, index=sunder_levels.index(current_sunder) if current_sunder in sunder_levels else 0, key=f"detail_sunder_{detail_idx}_{st.session_state.damage_axis_editor_version}")
+                    with d2:
+                        edit_extra_crit_rate = st.number_input("额外暴击率%", value=float(to_num(detail_row.get("额外暴击率%", 0), 0)), step=1.0, key=f"detail_crit_rate_{detail_idx}_{st.session_state.damage_axis_editor_version}")
+                        edit_extra_crit_damage = st.number_input("额外暴伤%", value=float(to_num(detail_row.get("额外暴伤%", 0), 0)), step=1.0, key=f"detail_crit_damage_{detail_idx}_{st.session_state.damage_axis_editor_version}")
+                        edit_attr_bonus = st.number_input("属性增伤%", value=float(to_num(detail_row.get("属性增伤%", 0), 0)), step=1.0, key=f"detail_attr_bonus_{detail_idx}_{st.session_state.damage_axis_editor_version}")
+                        edit_fragile = st.number_input("脆弱%", value=float(to_num(detail_row.get("脆弱%", 0), 0)), step=1.0, key=f"detail_fragile_{detail_idx}_{st.session_state.damage_axis_editor_version}")
+                        edit_amp = st.number_input("增幅%", value=float(to_num(detail_row.get("增幅%", 0), 0)), step=1.0, key=f"detail_amp_{detail_idx}_{st.session_state.damage_axis_editor_version}")
+                    if edit_action == "物理异常":
+                        edit_skill_bonus = 0.0
+                        edit_combo = 0.0
+                    else:
+                        edit_skill_bonus = st.number_input("技能增伤%", value=float(to_num(detail_row.get("技能增伤%", 0), 0)), step=1.0, key=f"detail_skill_bonus_{detail_idx}_{st.session_state.damage_axis_editor_version}")
+                        edit_combo = st.number_input("连击增伤%", value=float(to_num(detail_row.get("连击增伤%", 0), 0)), step=1.0, key=f"detail_combo_{detail_idx}_{st.session_state.damage_axis_editor_version}")
+                    edit_crit_mode = st.selectbox("暴击计算", crit_options, index=crit_options.index(current_crit_mode), key=f"detail_crit_mode_{detail_idx}_{st.session_state.damage_axis_editor_version}")
+                    edit_stagger = st.toggle("失衡易伤30%", value=bool(detail_row.get("失衡易伤30%", False)), key=f"detail_stagger_{detail_idx}_{st.session_state.damage_axis_editor_version}")
+                    preview_detail_row = detail_row.copy()
+                    preview_detail_row.update({"位置": edit_slot, "干员": st.session_state.team_panel_results.get(edit_slot, {}).get("干员", detail_row.get("干员", "")), "动作": edit_action, "伤害属性": edit_damage_type, "倍率%": edit_multiplier, "攻击%": edit_atk_pct, "固定攻击": edit_fixed_atk, "额外暴击率%": edit_extra_crit_rate, "额外暴伤%": edit_extra_crit_damage, "技能增伤%": edit_skill_bonus, "属性增伤%": edit_attr_bonus, "易伤%": edit_vuln, "碎甲易伤等级": edit_sunder, "脆弱%": edit_fragile, "增幅%": edit_amp, "连击增伤%": edit_combo, "异常类型": edit_anomaly_type, "异常等级": edit_anomaly_level, "暴击模式": edit_crit_mode, "失衡易伤30%": edit_stagger})
+                    preview_detail_damage, _ = calc_axis_damage(preview_detail_row)
+                    st.metric("修改后预览", f"{preview_detail_damage:,.0f}")
+                    if st.button("保存该动作详情", use_container_width=True, key=f"save_detail_{detail_idx}_{st.session_state.damage_axis_editor_version}"):
+                        st.session_state.damage_axis_rows[detail_idx] = preview_detail_row.copy()
+                        st.session_state.damage_axis_editor_version += 1
+                        st.rerun()
         else:
             st.info("伤害轴还是空的。先在左边添加一个动作。")
             st.metric("伤害累计", "0")
