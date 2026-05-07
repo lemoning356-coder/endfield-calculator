@@ -7,7 +7,7 @@ import streamlit as st
 from openpyxl import load_workbook
 
 # =========================
-# 页面设置py -m streamlit run 终末地计算工具.py
+# 页面设置
 # =========================
 st.set_page_config(page_title="终末地计算工具", layout="wide")
 
